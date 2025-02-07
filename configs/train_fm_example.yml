@@ -1,0 +1,78 @@
+run_name: train_fm_example # XXX CHANGE
+pocket_representation: 'surface'
+coarse_stage: True
+rotate: False
+connect: False
+
+train_params:
+  logdir: '/path/to/logs' # XXX CHANGE
+  datadir: '/path/to/training_data_directory' # XXX CHANGE
+  frag_library: '/path/to/library' # XXX CHANGE
+  use_ev: False
+  frag_sdfs: '/path/to/fragments_ev.sdf' # XXX CHANGE
+
+  enable_progress_bar: True
+  num_sanity_val_steps: 0
+  batch_size: 32
+  accumulate_grad_batches: 2
+  lr: 5.0e-4
+  n_epochs: 10
+  num_workers: 0
+  gpus: 1
+  clip_grad: True
+  gnina: null # null, 'gnina'
+  plip: null
+
+wandb_params:
+  mode: 'online'  # disabled, offline, online
+  entity: wandb_entitiy # XXX CHANGE
+  group: group_name # XXX CHANGE
+
+loss_params:
+  discrete_loss: 'VLB'  # 'VLB' or 'CE'
+  lambda_x: 1.0
+  lambda_h: 100.0
+  timestep_weights: null
+
+eval_params:
+  eval_epochs: 50
+  n_eval_samples: 4
+  eval_batch_size: 16
+  visualize_sample_epoch: 1
+  n_visualize_samples: 100
+  visualize_chain_epoch: 1
+  keep_frames: 100
+  sample_with_ground_truth_size: True
+  topk: 1
+
+predictor_params:
+  backbone: 'gvp'
+  pocket_encoder: 'dmasif'
+  edge_cutoff_pocket: 2.0
+  edge_cutoff_ligand: null
+  edge_cutoff_interaction: 10.0
+  spectral_feat: False
+  self_conditioning: True
+  normal_modes: True
+  add_all_atom_diff: False
+  heterogeneous_graph: True
+  reflection_equivariant: False
+  d_max: 15.0
+  num_rbf: 16
+  k_neighbours: 10
+
+  gvp_params:
+    n_layers: 5
+    node_h_dim: [ 265, 32 ]  # (s, V)
+    edge_h_dim: [ 64, 16 ]
+    dropout: 0.0
+    vector_gate: True
+
+  dmasif_params:
+    trained_dmasif: /path/to/checkpoint/encoder.ckpt
+
+simulation_params:
+  n_steps: 500
+  prior_h: gaussian  # gaussian, marginal
+  prior_e: uniform  # uniform, marginal
+  h_flow: spherical

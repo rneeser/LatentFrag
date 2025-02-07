@@ -1,0 +1,90 @@
+run_name: train_encoder_example # XXX CHANGE
+logdir: /path/to/logdir # XXX CHANGE
+
+gpus: 1
+seed: 42
+debug: False
+
+wandb_params:
+  mode: online # online, disabled
+  entity: wandb_name # XXX CHANGE
+  group: group_name # XXX CHANGE
+
+trainer_params:
+  max_epochs: 25
+  enable_progress_bar: True
+  num_sanity_val_steps: 0
+  val_check_interval: 1.0
+  gradient_clip_val: null
+  log_every_n_steps: 1
+
+batch_size: 32
+lr: 1.0e-3
+num_workers: 0
+
+mode: frag_embed
+
+eval_strategies: configs/eval_strategies_all_pocket.json
+
+dataset_params:
+  datadir: /path/to/fragments_min_8 # XXX CHANGE
+  pdb_dir: /path/to/chains_protonated # XXX CHANGE: dir with actual PDB files and complete ligands
+  preprocess: False
+  subset: -1 # -1 for all
+  eval_frequency: 5
+  nci_dir: /path/to/chain_ncis # XXX CHANGE: directory with precomputed NCIs as .pt files
+
+# params used pretrained patches
+surface: msms
+surface_params:
+  msms_bin: /path/to/msms.x86_64Linux2.2.6.1 # XXX CHANGE
+  resolution: 1.0
+  sup_sampling: 20
+  faces: False
+
+surface_encoder: dmasif
+ligand_encoder: graphtransformer
+
+dmasif_params:
+  n_layers: 2
+  hidden_dims: 16
+  emb_dims: 128
+  radius: 3.0
+  curvature_scales: [1.0, 3.0, 5.0, 7.0, 9.0]
+  orientation_units: 16
+  dropout: 0.0
+  atom_dims: 6
+  no_geom: False
+  no_chem: False
+
+graphtransformer_params:
+  n_layers: 4
+  input_dims_node: 37
+  input_dim_edge: 5
+  input_dims_global: 27
+  hidden_mlp_dims: {'X': 256, 'E': 64, 'y': 256}
+  hidden_dims: {'dx': 256, 'de': 32, 'dy': 256, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+  output_node_nf: 128
+  output_dims_edge: 5
+  output_dims_global: 128
+  act_fn_in: relu # for now on relu implemented
+  act_fn_out: relu
+  use_ev: False
+  addition: True
+  project: True
+  learned_global: True
+
+loss_params:
+  loss_type: cos
+  positive_type: regression
+  regularize_desc: 0.1
+  thresh: 3.0
+  predict_nci: True
+  frag_only_loss: tanimoto # 'tanimoto', null
+  lambda_frag: 1.0
+  intra_frag_margin: 0.3
+  pooled_mol_desc: True
+  negatives:
+    pockets: 0.34
+    pocket_concave: 0.33
+    pocket_convex: 0.33

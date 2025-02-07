@@ -1,0 +1,28 @@
+[
+    {
+        "pockets": 1.0
+    },
+    {
+        "pocket_concave": 1.0
+    },
+    {
+        "pocket_convex": 1.0
+    },
+    {
+        "pockets": 0.5,
+        "pocket_concave": 0.5
+    },
+    {
+        "pockets": 0.5,
+        "pocket_convex": 0.5
+    },
+    {
+        "pocket_concave": 0.5,
+        "pocket_convex": 0.5
+    },
+    {
+        "pockets": 0.33,
+        "pocket_concave": 0.33,
+        "pocket_convex": 0.33
+    }
+]

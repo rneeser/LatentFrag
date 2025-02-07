@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latentfrag"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {file = "LICENSE"}
+description = "Fragment identification in latent space."
+dependencies = [
+    # "rdkit",
+]
+authors = [
+    {name = "Rebecca Neeser", email = "rebecca.neeser@epfl.ch"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+]
+dynamic = ["version"]
+
+[project.urls]
+source = "https://github.com/rneeser/LatentFrag.git"
+tracker = "https://github.com/rneeser/LatentFrag.git/issues"
+
+[project.optional-dependencies]
+test = [
+    "hypothesis",
+    "pytest",
+    "pytest-cov",
+    "tox",
+    "genbadge[coverage]",
+]
+doc = [
+    "furo",
+    "myst-parser",
+    "sphinx>=5",
+    "sphinx-copybutton",
+]
+
+[tool.hatch.version]
+path = "src/latentfrag/__init__.py"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+
+[tool.coverage.run]
+omit = [
+    '__init__.py'
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+]
