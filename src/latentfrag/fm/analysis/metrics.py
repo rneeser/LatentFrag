@@ -1,4 +1,8 @@
-
+'''
+Code adapted from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 import tempfile
 from pathlib import Path
 import subprocess

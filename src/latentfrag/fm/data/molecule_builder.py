@@ -1,4 +1,8 @@
-
+'''
+Code adapted from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 from rdkit import Chem
 
 from latentfrag.fm.utils import constants

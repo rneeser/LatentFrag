@@ -1,3 +1,8 @@
+'''
+Code adapted from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 from typing import Optional
 from pathlib import Path
 from functools import partial

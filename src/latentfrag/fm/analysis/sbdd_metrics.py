@@ -1,3 +1,8 @@
+'''
+Code adapted from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 import multiprocessing
 import subprocess
 import tempfile

@@ -4,26 +4,36 @@
 
 1. Query PDB
 
-    Download all relevant PDBs to `DATA=/path/to/datadir`:
+    Define a list of relevant PDB files on [rcsb.org/search](https://www.rcsb.org/search) and download to `$DATA/pdb_ids.txt`
+
+    ```
+    QUERY:
+        ( Experimental Method = "X-RAY DIFFRACTION" OR Experimental Method = "ELECTRON MICROSCOPY" OR Experimental Method = "SOLID-STATE NMR" OR Experimental Method = "SOLUTION NMR" )
+        AND Refinement Resolution <= 3
+        AND Entry Polymer Types = "Protein (only)"
+        AND Number of Distinct Non-polymer Entities >= 1
+    ```
+
+2.  Download PDB files all relevant PDBs to `DATA=/path/to/datadir`:
 
     ```shell
     mkdir -p $DATA/pdb
     bash latentfrag/encoder/data/batch_download.sh -f $DATA/pdb_ids.txt -O $DATA/pdb -p
     ```
 
-2. Download precomputed 30% identity clusters:
+3. Download precomputed 30% identity clusters:
 
     ```shell
     wget https://cdn.rcsb.org/resources/sequence/clusters/clusters-by-entity-30.txt -O $DATA/clusters-by-entity-30.txt
     ```
 
-3. Download SMILES of all ligands from PDB
+4. Download SMILES of all ligands from PDB
 
     ```shell
     wget http://ligand-expo.rcsb.org/dictionaries/Components-smiles-oe.smi -O $DATA/ligand_expo_smiles.smi
     ```
 
-4. Split PDB files in protein chains and ligands, clean and filter them, define interactions
+5. Split PDB files in protein chains and ligands, clean and filter them, define interactions
 
     ```shell
     python -W ignore latentfrag/encoder/data/process_pdb.py \
@@ -35,15 +45,15 @@
                     --enable_resume
     ```
 
-5. Download [HoloProt data and splits](https://drive.google.com/file/d/1o0_0OM_2PykzQTXCYagdJA2w4zoE4AUt/view?usp=sharing) – save to `$DATA/holoprot_splits`
+6. Download [HoloProt data and splits](https://drive.google.com/file/d/1o0_0OM_2PykzQTXCYagdJA2w4zoE4AUt/view?usp=sharing) – save to `$DATA/holoprot_splits`
 
-6. Get mapping between PDB chain and entity ids (for clustering) for processed PDB files
+7. Get mapping between PDB chain and entity ids (for clustering) for processed PDB files
 
     ```shell
     python latentfrag/encoder/data/build_chain_entity_mapping.py $DATA/chains $DATA/chain2entity.json
     ```
 
-7. Protonate proteins
+8. Protonate proteins
 
     ```shell
     python latentfrag/encoder/data/protonate.py --in_dir $DATA/chains --out_dir $DATA/chains_protonated --reduce $REDUCE

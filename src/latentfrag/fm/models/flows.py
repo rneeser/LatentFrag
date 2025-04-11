@@ -1,3 +1,8 @@
+'''
+Code adapted from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 from abc import ABC
 from abc import abstractmethod
 

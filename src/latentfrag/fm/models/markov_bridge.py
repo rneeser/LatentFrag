@@ -1,3 +1,8 @@
+'''
+Code taken from:
+DrugFlow by A. Schneuing & I. Igashov
+https://github.com/LPDI-EPFL/DrugFlow
+'''
 import torch
 import torch.nn.functional as F
 from torch_scatter import scatter_mean
