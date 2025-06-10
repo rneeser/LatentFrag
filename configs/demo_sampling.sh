@@ -10,4 +10,5 @@ python src/latentfrag/fm/sample.py \
     --msms_bin /path/to/msms.x86_64Linux2.2.6.1 \
     --trained_encoder /path/to/LatentFrag/checkpoints/encoder.ckpt  \
     --reference_ligand demo_data/1MVC_BM6.sdf \
-    --sample_gt_size
+    --sample_gt_size \
+    --skip_protonation

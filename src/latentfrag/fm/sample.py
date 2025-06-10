@@ -1,14 +1,51 @@
 import argparse
 from argparse import Namespace
 from pathlib import Path
+import subprocess
+import tempfile
 
 import torch
 from rdkit import Chem
+from rdkit.Chem import KekulizeException, AtomKekulizeException
 
 from latentfrag.fm.utils.gen_utils import set_deterministic, disable_rdkit_logging, write_sdf_file
 from latentfrag.fm.analysis.visualization_utils import mols_to_pdbfile
 from latentfrag.fm.data.data_utils import TensorDict, process_pocket_only, fragment_and_augment
 from latentfrag.fm.models.lightning import LatentFrag
+from latentfrag.fm.analysis.frag_metrics import GNINA_TRANSLATIONS
+
+
+def save_molecule(molecule, sdf_path):
+        if isinstance(molecule, (str, Path)):
+            return molecule
+
+        with Chem.SDWriter(str(sdf_path)) as w:
+            try:
+                w.write(molecule)
+            except (RuntimeError, ValueError) as e:
+                if isinstance(e, (KekulizeException, AtomKekulizeException)):
+                    w.SetKekulize(False)
+                    w.write(molecule)
+                    w.SetKekulize(True)
+                else:
+                    w.write(Chem.Mol())
+                    print('[FragNCIEvaluator] Error when saving the molecule')
+
+        return sdf_path
+
+
+def dock_molecule(molecule, protein, gnina='gnina', save_fn=None):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            molecule_fn = save_molecule(molecule, sdf_path=Path(tmpdir, 'molecule.sdf'))
+            out_mol = Path(tmpdir, 'docked_molecule.sdf')
+
+            args = f'--autobox_ligand {str(molecule_fn)} --autobox_extend 1'
+
+            gnina_cmd = f'{gnina} -r {str(protein)} -l {str(molecule_fn)} {args} -o {str(out_mol)} --seed 42'
+            gnina_out = subprocess.run(gnina_cmd, shell=True, capture_output=True, text=True)
+
+            docked_mol = Chem.SDMolSupplier(str(out_mol))[0]
+            save_molecule(docked_mol, save_fn)
 
 
 if __name__ == "__main__":
@@ -21,6 +58,12 @@ if __name__ == "__main__":
     p.add_argument('--trained_encoder', type=Path, required=True, help='Path to trained encoder model')
     p.add_argument('--frag_library', type=str, required=True)
     p.add_argument('--library_sdf', type=str, required=True)
+
+    # protein protonation parameters
+    p.add_argument('--skip_protonation', action='store_true', default=False,
+                   help='Skip protonation of the protein. If True, the protein is assumed to be already protonated.')
+    p.add_argument('--reduce_exec', type=str, default='reduce',
+                   help='Path to the reduce executable.')
 
     # sampling parameters
     p.add_argument('--n_samples', type=int, default=10)
@@ -43,6 +86,12 @@ if __name__ == "__main__":
                      help='Path to reference ligand for sampling with ground truth size')
     p.add_argument('--datadir', type=Path, default=None,
                    help='Path to data directory containing size histogram that was used for training')
+
+    # docking params
+    p.add_argument('--gnina_exec', type=str, default='gnina',
+                   help='Path to the gnina executable for docking the sampled ligands.')
+    p.add_argument('--dock_fragments', action='store_true', default=False,
+                   help='If True, dock the sampled fragments to the protein using gnina.')
 
     args = p.parse_args()
 
@@ -103,7 +152,17 @@ if __name__ == "__main__":
                                      dtype=torch.float32)
 
     # process protein
-    pocket = process_pocket_only(pdb_file = args.pdb,
+    if not args.skip_protonation:
+        print('Protonating protein...')
+        pdb_prot_path = args.outdir / f'{args.pdb.stem}_protonated.pdb'
+        subprocess.run(f'{args.reduce_exec} {str(args.pdb)} > {str(pdb_prot_path)} 2> /dev/null', shell=True)
+    else:
+        pdb_prot_path = args.pdb
+
+    assert pdb_prot_path.exists(), \
+        f'Protonated PDB file {pdb_prot_path} does not exist. '
+
+    pocket = process_pocket_only(pdb_file = pdb_prot_path,
                                  msms_bin = args.msms_bin,
                                  msms_resolution = args.msms_resolution,
                                  pocket_resids = args.residue_ids,
@@ -175,3 +234,18 @@ if __name__ == "__main__":
             f.write(smi_pred)
 
         name2count[name] += 1
+
+        if args.dock_fragments:
+            print(f'Docking {name}...')
+
+            # make docking directory
+            docking_dir = Path(output_dir, 'docking')
+            docking_dir.mkdir(parents=True, exist_ok=True)
+
+            supp = Chem.SDMolSupplier(str(out_sdf_path), sanitize=False)
+            molecules = [m for m in supp if m is not None]
+
+            for n, mol in enumerate(molecules):
+                save_fn = Path(docking_dir, f'{out_sdf_path.stem}_{n}_docked.sdf')
+                dock_molecule(mol, out_pdb_path, gnina=args.gnina_exec, save_fn=save_fn)
+

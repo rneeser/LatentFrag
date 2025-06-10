@@ -102,6 +102,13 @@ To train the encoder, a example config file is provided in `configs/train_encode
 python src/latentfrag/encoder/train.py --config configs/train_encoder_example.yml
 ```
 
+#### Make own fragment library
+To create your own fragment library based on our encoder to be used with LatentFrag, you can use the following script. It will compute the latent encodings of all fragments in a single `.sdf` file. If there are multiple conformers for the same fragment, the lowest energy conformer will be used.
+
+```bash
+python src/latentfrag/encoder/make_frag_library.py --sdf_path /path/to/your_fragments.sdf --ckpt /path/to/encoder.ckpt --out /path/to/out_dir
+```
+
 ### Generative modeling
 
 #### Fragment identification with Flow Matching
@@ -112,13 +119,15 @@ We provide a processed PDB file and the corresponding reference ligand for a sam
 - by chosen number (`--num_nodes`)
 - by histogram based on pocket size (`--size_histogram`)
 
-The pocket is defined either by a predefined radius around the reference ligand (`--reference_ligand`) or by defining pocket residues (`--residue_ids`). The following script defines the pocket nd the sampled nodes by the ligand. Sampled fragments are not docked and thus are placed with arbitrary orientation at the predicted centroid. Please adjust the paths in the bash script accordingly.
+The pocket is defined either by a predefined radius around the reference ligand (`--reference_ligand`) or by defining pocket residues (`--residue_ids`). The following script defines the pocket and the sampled nodes by the ligand. Sampled fragments are not docked and thus are placed with arbitrary orientation at the predicted centroid. Please adjust the paths in the bash script accordingly.
 
 ```bash
 cd LatentFrag
 conda activate latentfrag
 configs/demo_sampling.sh
 ```
+
+If you also want to dock the sampled fragments, add the argument `--dock_fragments` and define the path to the gnina executable with `--gnina_exec`. Furthermore, if you provide your own protein, please make sure it is protonated for best performance. Protonation can be carried out in the same script when removing `--skip_protoonation` in the example demo and providing the path to the reduce executable with `--reduce_exec`.
 
 #### Training FM
 

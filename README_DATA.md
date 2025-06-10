@@ -2,6 +2,8 @@
 
 ## Preparation for training of both encoder and generative model
 
+The following steps outline the pipeline to prepare the data for training the encoder and the generative model. For reproducibility, we share lists of PDB IDs with respective chain ID, cluster index and index of ligand in the sdf that is downloaded from the PDB for the training, validaation and test splits.
+
 1. Query PDB
 
     Define a list of relevant PDB files on [rcsb.org/search](https://www.rcsb.org/search) and download to `$DATA/pdb_ids.txt`
