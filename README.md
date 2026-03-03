@@ -23,7 +23,6 @@ pip cache purge
 pip install open3d==0.9.0
 pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
 pip install torch-geometric==2.3.1 -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
-pip install pykeops==1.5
 
 pip install pandas matplotlib jupyter pytorch-lightning==1.8.0 wandb==0.13.4 rdkit-pypi==2022.9.5 biopython==1.78 pdb-tools==2.5.0 ProDy==2.4.0
 pip install plyfile==0.7.2 pyvtk==0.5.18
@@ -37,7 +36,7 @@ cd LatentFrag
 pip install -e .
 ```
 
-Test the installation (mainly for pykeops):
+Test the installation:
 
 ```bash
 python test_setup.py

@@ -1,31 +1,39 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pykeops.torch import LazyTensor
 
 from latentfrag.encoder.dmasif.geometry_processing import (
     curvatures,
     mesh_normals_areas,
     tangent_vectors,
-    dMaSIFConv
+    dMaSIFConv,
+    _batch_mask,
 )
-from latentfrag.encoder.dmasif.helper import diagonal_ranges
+from latentfrag.encoder.dmasif.helper import ranges_slices
 
 
 def knn_atoms(x, y, x_batch, y_batch, k):
+    """K-nearest-neighbor search with batch support.
+
+    For every point in *x* find the *k* closest points in *y*, respecting
+    the batch assignment given by *x_batch* / *y_batch*.
+
+    Returns:
+        idx  (N, K) long – indices into *y*
+        dists (N, K) float – squared distances
+    """
     N, D = x.shape
-    x_i = LazyTensor(x[:, None, :])
-    y_j = LazyTensor(y[None, :, :])
 
-    pairwise_distance_ij = ((x_i - y_j) ** 2).sum(-1)
-    pairwise_distance_ij.ranges = diagonal_ranges(x_batch, y_batch)
+    # Dense pairwise squared distances
+    pw_dist = ((x[:, None, :] - y[None, :, :]) ** 2).sum(-1)  # (N, M)
 
-    # N.B.: KeOps doesn't yet support backprop through Kmin reductions...
-    # dists, idx = pairwise_distance_ij.Kmin_argKmin(K=k,axis=1)
-    # So we have to re-compute the values ourselves:
-    idx = pairwise_distance_ij.argKmin(K=k, axis=1)  # (N, K)
-    x_ik = y[idx.view(-1)].view(N, k, D)
-    dists = ((x[:, None, :] - x_ik) ** 2).sum(-1)
+    # Mask out cross-batch pairs with +inf so they are never selected
+    mask = _batch_mask(x_batch, y_batch)  # (N, M)
+    if mask is not None:
+        pw_dist = pw_dist.masked_fill(~mask, float('inf'))
+
+    # Smallest k distances per row
+    dists, idx = pw_dist.topk(k, dim=1, largest=False, sorted=True)  # (N, K)
 
     return idx, dists
 
@@ -281,15 +289,21 @@ class dMaSIFConv_seg(torch.nn.Module):
         The routine updates the model attributes:
         - points, i.e. the point cloud itself,
         - nuv, a local oriented basis in R^3 for every point,
-        - ranges, custom KeOps syntax to implement batch processing.
+        - ranges, batch ranges for masking in convolution layers.
         """
 
         # 1. Save the vertices for later use in the convolutions ---------------
         self.points = xyz
         self.batch = batch
-        self.ranges = diagonal_ranges(
-            batch
-        )  # KeOps support for heterogeneous batch processing
+
+        # Build ranges tuple (kept for API compat with dMaSIFConv.forward)
+        if batch is not None:
+            range_info, _ = ranges_slices(batch)
+            # Wrap into the tuple format that dMaSIFConv.forward expects
+            self.ranges = (range_info,)
+        else:
+            self.ranges = None
+
         self.triangles = triangles
         self.normals = normals
         self.weights = weights
@@ -304,34 +318,30 @@ class dMaSIFConv_seg(torch.nn.Module):
         tangent_bases = tangent_vectors(normals)  # Tangent basis (N, 2, 3)
 
         # 3. Steer the tangent bases according to the gradient of "weights" ----
+        N = points.shape[0]
 
-        # 3.a) Encoding as KeOps LazyTensors:
-        # Orientation scores:
-        weights_j = LazyTensor(weights.view(1, -1, 1))  # (1, N, 1)
-        # Vertices:
-        x_i = LazyTensor(points[:, None, :])  # (N, 1, 3)
-        x_j = LazyTensor(points[None, :, :])  # (1, N, 3)
-        # Normals:
-        n_i = LazyTensor(normals[:, None, :])  # (N, 1, 3)
-        n_j = LazyTensor(normals[None, :, :])  # (1, N, 3)
-        # Tangent basis:
-        uv_i = LazyTensor(tangent_bases.view(-1, 1, 6))  # (N, 1, 6)
+        # 3.a) Pairwise quantities:
+        diff = points[None, :, :] - points[:, None, :]  # (N, N, 3)
 
         # 3.b) Pseudo-geodesic window:
-        # Pseudo-geodesic squared distance:
-        rho2_ij = ((x_j - x_i) ** 2).sum(-1) * ((2 - (n_i | n_j)) ** 2)  # (N, N, 1)
-        # Gaussian window:
-        window_ij = (-rho2_ij).exp()  # (N, N, 1)
+        sq_dist = (diff ** 2).sum(-1)  # (N, N)
+        dot_nn = (normals[:, None, :] * normals[None, :, :]).sum(-1)  # (N, N)
+        rho2_ij = sq_dist * ((2 - dot_nn) ** 2)  # (N, N)
+        window_ij = (-rho2_ij).exp()  # (N, N)
 
         # 3.c) Coordinates in the (u, v) basis - not oriented yet:
-        X_ij = uv_i.matvecmult(x_j - x_i)  # (N, N, 2)
+        uv_mat = tangent_bases.view(N, 2, 3)  # (N, 2, 3)
+        X_ij = torch.einsum('iac,ijc->ija', uv_mat, diff)  # (N, N, 2)
 
         # 3.d) Local average in the tangent plane:
-        orientation_weight_ij = window_ij * weights_j  # (N, N, 1)
-        orientation_vector_ij = orientation_weight_ij * X_ij  # (N, N, 2)
+        weights_j = weights.view(1, N)  # (1, N)
+        orientation_weight_ij = window_ij * weights_j  # (N, N)
+        orientation_vector_ij = orientation_weight_ij[:, :, None] * X_ij  # (N, N, 2)
 
-        # Support for heterogeneous batch processing:
-        orientation_vector_ij.ranges = self.ranges  # Block-diagonal sparsity mask
+        # Apply batch mask:
+        mask = _batch_mask(batch)  # (N, N) or None
+        if mask is not None:
+            orientation_vector_ij = orientation_vector_ij * mask[:, :, None].float()
 
         orientation_vector_i = orientation_vector_ij.sum(dim=1)  # (N, 2)
         orientation_vector_i = (
