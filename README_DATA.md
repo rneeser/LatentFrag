@@ -8,7 +8,7 @@ The following steps outline the pipeline to prepare the data for training the en
 
     Define a list of relevant PDB files on [rcsb.org/search](https://www.rcsb.org/search) and download to `$DATA/pdb_ids.txt`
 
-    ```
+    ```shell
     QUERY:
         ( Experimental Method = "X-RAY DIFFRACTION" OR Experimental Method = "ELECTRON MICROSCOPY" OR Experimental Method = "SOLID-STATE NMR" OR Experimental Method = "SOLUTION NMR" )
         AND Refinement Resolution <= 3
@@ -16,7 +16,7 @@ The following steps outline the pipeline to prepare the data for training the en
         AND Number of Distinct Non-polymer Entities >= 1
     ```
 
-2.  Download PDB files all relevant PDBs to `DATA=/path/to/datadir`:
+2. Download PDB files all relevant PDBs to `DATA=/path/to/datadir`:
 
     ```shell
     mkdir -p $DATA/pdb

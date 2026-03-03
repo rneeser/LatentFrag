@@ -8,6 +8,7 @@ from latentfrag.encoder.dmasif.geometry_processing import (
     tangent_vectors,
     dMaSIFConv,
     _batch_mask,
+    _CHUNK_SIZE,
 )
 from latentfrag.encoder.dmasif.helper import ranges_slices
 
@@ -22,20 +23,25 @@ def knn_atoms(x, y, x_batch, y_batch, k):
         idx  (N, K) long – indices into *y*
         dists (N, K) float – squared distances
     """
-    N, D = x.shape
+    N = x.shape[0]
 
-    # Dense pairwise squared distances
-    pw_dist = ((x[:, None, :] - y[None, :, :]) ** 2).sum(-1)  # (N, M)
+    # Chunked over rows to avoid O(N*M) peak memory
+    idx_list = []
+    dists_list = []
 
-    # Mask out cross-batch pairs with +inf so they are never selected
-    mask = _batch_mask(x_batch, y_batch)  # (N, M)
-    if mask is not None:
-        pw_dist = pw_dist.masked_fill(~mask, float('inf'))
+    for i0 in range(0, N, _CHUNK_SIZE):
+        i1 = min(i0 + _CHUNK_SIZE, N)
+        pw = ((x[i0:i1, None, :] - y[None, :, :]) ** 2).sum(-1)  # (chunk, M)
 
-    # Smallest k distances per row
-    dists, idx = pw_dist.topk(k, dim=1, largest=False, sorted=True)  # (N, K)
+        if x_batch is not None:
+            mask_c = (x_batch[i0:i1, None] == y_batch[None, :])  # (chunk, M)
+            pw = pw.masked_fill(~mask_c, float('inf'))
 
-    return idx, dists
+        d, idx = pw.topk(k, dim=1, largest=False, sorted=True)
+        idx_list.append(idx)
+        dists_list.append(d)
+
+    return torch.cat(idx_list, dim=0), torch.cat(dists_list, dim=0)
 
 
 def get_atom_features(x, y, x_batch, y_batch, y_atomtype, k=16):
@@ -319,31 +325,33 @@ class dMaSIFConv_seg(torch.nn.Module):
 
         # 3. Steer the tangent bases according to the gradient of "weights" ----
         N = points.shape[0]
-
-        # 3.a) Pairwise quantities:
-        diff = points[None, :, :] - points[:, None, :]  # (N, N, 3)
-
-        # 3.b) Pseudo-geodesic window:
-        sq_dist = (diff ** 2).sum(-1)  # (N, N)
-        dot_nn = (normals[:, None, :] * normals[None, :, :]).sum(-1)  # (N, N)
-        rho2_ij = sq_dist * ((2 - dot_nn) ** 2)  # (N, N)
-        window_ij = (-rho2_ij).exp()  # (N, N)
-
-        # 3.c) Coordinates in the (u, v) basis - not oriented yet:
         uv_mat = tangent_bases.view(N, 2, 3)  # (N, 2, 3)
-        X_ij = torch.einsum('iac,ijc->ija', uv_mat, diff)  # (N, N, 2)
 
-        # 3.d) Local average in the tangent plane:
-        weights_j = weights.view(1, N)  # (1, N)
-        orientation_weight_ij = window_ij * weights_j  # (N, N)
-        orientation_vector_ij = orientation_weight_ij[:, :, None] * X_ij  # (N, N, 2)
+        # Chunked aggregation over j to avoid O(N²) memory
+        orientation_vector_i = torch.zeros(N, 2, device=points.device, dtype=points.dtype)
 
-        # Apply batch mask:
-        mask = _batch_mask(batch)  # (N, N) or None
-        if mask is not None:
-            orientation_vector_ij = orientation_vector_ij * mask[:, :, None].float()
+        for j0 in range(0, N, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, N)
+            pj = points[j0:j1, :]   # (chunk, 3)
+            nj = normals[j0:j1, :]  # (chunk, 3)
 
-        orientation_vector_i = orientation_vector_ij.sum(dim=1)  # (N, 2)
+            diff = pj[None, :, :] - points[:, None, :]  # (N, chunk, 3)
+            sq_dist = (diff ** 2).sum(-1)  # (N, chunk)
+            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
+            rho2 = sq_dist * ((2 - dot_nn) ** 2)
+            window = (-rho2).exp()  # (N, chunk)
+
+            X_c = torch.einsum('iac,ijc->ija', uv_mat, diff)  # (N, chunk, 2)
+
+            w_j = weights[j0:j1].view(1, -1)  # (1, chunk)
+            ow_c = window * w_j  # (N, chunk)
+            ov_c = ow_c[:, :, None] * X_c  # (N, chunk, 2)
+
+            if batch is not None:
+                mask_c = (batch[:, None] == batch[None, j0:j1])  # (N, chunk)
+                ov_c = ov_c * mask_c[:, :, None].float()
+
+            orientation_vector_i = orientation_vector_i + ov_c.sum(dim=1)  # (N, 2)
         orientation_vector_i = (
             orientation_vector_i + 1e-5
         )  # Just in case someone's alone...

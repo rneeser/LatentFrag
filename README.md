@@ -44,11 +44,11 @@ python test_setup.py
 
 ### Install reduce
 
-Reduce is needed to protonate the protein structures. Follow instructions from [here](https://github.com/rlabduke/reduce) to install reduce.
+Reduce is needed to protonate the protein structures. Follow instructions from the [reduced repo](https://github.com/rlabduke/reduce) to install reduce.
 
 ### Install MSMS
 
-MSMS is needed to compute protein surfaces. Follow instructions from [here](https://ccsb.scripps.edu/msms/downloads/) to install MSMS.
+MSMS is needed to compute protein surfaces. Follow instructions from the [provider website](https://ccsb.scripps.edu/msms/downloads/) to install MSMS.
 
 For example for linux unpack the downloaded binary like this:
 
@@ -58,7 +58,7 @@ tar zxvf msms_i86_64Linux2_2.6.1.tar.gz
 
 ### Install PLIP
 
-PLIP is needed to compute protein-ligand interactions. Find more information [here](https://plip-tool.biotec.tu-dresden.de/plip-web/plip/index).
+PLIP is needed to compute protein-ligand interactions. Find more information on the [PLIP documentation](https://plip-tool.biotec.tu-dresden.de/plip-web/plip/index).
 
 ```bash
 git clone https://github.com/pharmai/plip.git
@@ -71,7 +71,7 @@ plipcmd -h
 
 ## Data
 
-Download the data from [here](https://figshare.com/s/c28e5d7f9d318305614e). We provide files necessary for inference and model checkpoints for both the encoder and the flow matching model. In order to generate the data for training, please follow the instructions in the `README_DATA.md`.
+Download the data from [the figshare](https://figshare.com/s/c28e5d7f9d318305614e). We provide files necessary for inference and model checkpoints for both the encoder and the flow matching model. In order to generate the data for training, please follow the instructions in the `README_DATA.md`.
 
 ## Usage
 
@@ -102,6 +102,7 @@ python src/latentfrag/encoder/train.py --config configs/train_encoder_example.ym
 ```
 
 #### Make own fragment library
+
 To create your own fragment library based on our encoder to be used with LatentFrag, you can use the following script. It will compute the latent encodings of all fragments in a single `.sdf` file. If there are multiple conformers for the same fragment, the lowest energy conformer will be used.
 
 ```bash
