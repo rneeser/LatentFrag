@@ -1010,8 +1010,9 @@ class LatentFrag(pl.LightningModule):
 
         return ligand_chain, pocket_chain, info
 
-    def configure_gradient_clipping(self, optimizer, optimizer_idx,
-                                    gradient_clip_val, gradient_clip_algorithm):
+    def configure_gradient_clipping(self, optimizer, *args,
+                                    gradient_clip_val=None,
+                                    gradient_clip_algorithm=None, **kwargs):
 
         if not self.clip_grad:
             return
