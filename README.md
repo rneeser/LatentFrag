@@ -54,6 +54,8 @@ pip install -e .
 
 ### Option B: Legacy environment (Python 3.7)
 
+The models were trained with this setup, but it might not be compatible with modern CUDA/PyTorch versions. Use this if you have specific dependency constraints or want to exactly replicate the original training environment.
+
 <details>
 <summary>Click to expand legacy install instructions</summary>
 
