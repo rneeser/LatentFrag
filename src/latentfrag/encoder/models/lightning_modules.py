@@ -85,6 +85,12 @@ class BaseModule(pl.LightningModule):
         self.val_dataset = None
         self.test_dataset = None
 
+        # Accumulate step outputs for epoch-end hooks
+        # (compatible with both Lightning 1.x and 2.x)
+        self._train_step_outputs = []
+        self._val_step_outputs = []
+        self._test_step_outputs = []
+
     def pdb_to_surface(self, pdb, faces=False):
         faces = self.compute_faces or faces
 
@@ -643,11 +649,13 @@ class FragEmbed(BaseModule):
         if self.predict_nci:
             self.log('nci_loss/train', nci_loss, batch_size=batch_size)
 
-        return {
+        out = {
             'loss': loss,
             'preds': preds,
             'labels': labels
         }
+        self._train_step_outputs.append(out)
+        return out
 
     def _shared_eval(self, batch, prefix, *args):
         with open(self.eval_strategies, 'r') as f:
@@ -720,10 +728,16 @@ class FragEmbed(BaseModule):
         }
 
     def validation_step(self, batch, *args):
-        return self._shared_eval(batch, 'val', *args)
+        out = self._shared_eval(batch, 'val', *args)
+        if out is not None:
+            self._val_step_outputs.append(out)
+        return out
 
     def test_step(self, batch, *args):
-        return self._shared_eval(batch, 'test', *args)
+        out = self._shared_eval(batch, 'test', *args)
+        if out is not None:
+            self._test_step_outputs.append(out)
+        return out
 
     def compute_metrics(self, step_outputs, prefix):
 
@@ -738,21 +752,27 @@ class FragEmbed(BaseModule):
         self.log(f'roc_auc/{prefix}', roc_auc, prog_bar=True, sync_dist=True)
 
 
-    def training_epoch_end(self, training_step_outputs):
-        self.compute_metrics(training_step_outputs, 'train')
+    def on_train_epoch_end(self):
+        if self._train_step_outputs:
+            self.compute_metrics(self._train_step_outputs, 'train')
+        self._train_step_outputs.clear()
 
-    def validation_epoch_end(self, validation_step_outputs):
-        self.compute_metrics(validation_step_outputs, 'val')
+    def on_validation_epoch_end(self):
+        if self._val_step_outputs:
+            self.compute_metrics(self._val_step_outputs, 'val')
         if self.curvatures_boosting is not None:
             self.compute_pocket_correlation(prefix='val')
         if self.current_epoch % self.eval_frequency == 0:
             self.plot_pca('val')
+        self._val_step_outputs.clear()
 
-    def test_epoch_end(self, test_step_outputs):
-        self.compute_metrics(test_step_outputs, 'test')
+    def on_test_epoch_end(self):
+        if self._test_step_outputs:
+            self.compute_metrics(self._test_step_outputs, 'test')
         self.plot_pca('test')
         if self.curvatures_boosting is not None:
             self.compute_pocket_correlation(prefix='test')
+        self._test_step_outputs.clear()
 
     def compute_pocket_correlation(self, prefix, thresh=3.0):
         all_embeddings = []
