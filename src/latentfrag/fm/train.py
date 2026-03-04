@@ -149,7 +149,7 @@ if __name__ == "__main__":
         accumulate_grad_batches=args.train_params.accumulate_grad_batches,
         accelerator='gpu' if args.train_params.gpus > 0 else 'cpu',
         devices=args.train_params.gpus if args.train_params.gpus > 0 else 'auto',
-        strategy=('ddp' if args.train_params.gpus > 1 else None),
+        strategy=('ddp' if args.train_params.gpus > 1 else ('auto' if pl.__version__ >= '2.0.0' else None)),
         log_every_n_steps=1,
         detect_anomaly=False,
     )

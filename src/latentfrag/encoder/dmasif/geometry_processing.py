@@ -384,28 +384,32 @@ def mesh_normals_areas(vertices, triangles=None, scale=[1.0], batch=None, normal
     if single_scale:
         U = torch.zeros(Nv, 3, device=vertices.device, dtype=vertices.dtype)
         scale_sq2 = 2 * (scales[0] ** 2)
-        for j0 in range(0, M, _CHUNK_SIZE):
-            j1 = min(j0 + _CHUNK_SIZE, M)
-            D_c = ((vertices[:, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)  # (Nv, chunk)
-            K_c = (-D_c / scale_sq2).exp()
-            if batch_vertices is not None:
-                mask_c = (batch_vertices[:, None] == batch_centers[None, j0:j1])
-                K_c = K_c * mask_c.float()
-            U = U + (K_c[:, :, None] * V[None, j0:j1, :]).sum(dim=1)
+        for i0 in range(0, Nv, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, Nv)
+            for j0 in range(0, M, _CHUNK_SIZE):
+                j1 = min(j0 + _CHUNK_SIZE, M)
+                D_c = ((vertices[i0:i1, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)
+                K_c = (-D_c / scale_sq2).exp()
+                if batch_vertices is not None:
+                    mask_c = (batch_vertices[i0:i1, None] == batch_centers[None, j0:j1])
+                    K_c = K_c * mask_c.float()
+                U[i0:i1] = U[i0:i1] + (K_c[:, :, None] * V[None, j0:j1, :]).sum(dim=1)
     else:
         S = len(scales)
         U = torch.zeros(Nv, S, 3, device=vertices.device, dtype=vertices.dtype)
-        for j0 in range(0, M, _CHUNK_SIZE):
-            j1 = min(j0 + _CHUNK_SIZE, M)
-            D_c = ((vertices[:, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)  # (Nv, chunk)
-            if batch_vertices is not None:
-                mask_c = (batch_vertices[:, None] == batch_centers[None, j0:j1])
-            V_c = V[j0:j1, :]
-            for s_idx in range(S):
-                K_s = (-D_c / (2 * scales[s_idx] ** 2)).exp()
+        for i0 in range(0, Nv, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, Nv)
+            for j0 in range(0, M, _CHUNK_SIZE):
+                j1 = min(j0 + _CHUNK_SIZE, M)
+                D_c = ((vertices[i0:i1, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)
                 if batch_vertices is not None:
-                    K_s = K_s * mask_c.float()
-                U[:, s_idx, :] = U[:, s_idx, :] + (K_s[:, :, None] * V_c[None, :, :]).sum(dim=1)
+                    mask_c = (batch_vertices[i0:i1, None] == batch_centers[None, j0:j1])
+                V_c = V[j0:j1, :]
+                for s_idx in range(S):
+                    K_s = (-D_c / (2 * scales[s_idx] ** 2)).exp()
+                    if batch_vertices is not None:
+                        K_s = K_s * mask_c.float()
+                    U[i0:i1, s_idx, :] = U[i0:i1, s_idx, :] + (K_s[:, :, None] * V_c[None, :, :]).sum(dim=1)
 
     normals = F.normalize(U, p=2, dim=-1)  # (Nv, 3) or (Nv, S, 3)
 
@@ -500,37 +504,44 @@ def curvatures(
         normals = normals_s[:, s, :].contiguous()  # (N, 3)
         uv = uv_s[:, s, :, :].contiguous()  # (N, 2, 3)
 
-        # Chunked aggregation over j to avoid O(N²) memory
+        # Chunked aggregation over both i and j to avoid O(N²) memory
         scale_sq2 = 2 * (scale ** 2)
         PPt_PQt = torch.zeros(N, 8, device=vertices.device, dtype=vertices.dtype)
 
-        for j0 in range(0, N, _CHUNK_SIZE):
-            j1 = min(j0 + _CHUNK_SIZE, N)
-            vj = vertices[j0:j1, :]  # (chunk, 3)
-            nj = normals[j0:j1, :]   # (chunk, 3)
+        for i0 in range(0, N, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, N)
+            vi = vertices[i0:i1, :]   # (chunk_i, 3)
+            ni = normals[i0:i1, :]    # (chunk_i, 3)
+            uv_i = uv[i0:i1, :, :]   # (chunk_i, 2, 3)
+            Ci = i1 - i0
 
-            diff_x = vj[None, :, :] - vertices[:, None, :]  # (N, chunk, 3)
-            diff_n = nj[None, :, :] - normals[:, None, :]    # (N, chunk, 3)
+            for j0 in range(0, N, _CHUNK_SIZE):
+                j1 = min(j0 + _CHUNK_SIZE, N)
+                vj = vertices[j0:j1, :]  # (chunk_j, 3)
+                nj = normals[j0:j1, :]   # (chunk_j, 3)
 
-            sq_dist = (diff_x ** 2).sum(-1)  # (N, chunk)
-            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
-            d2_c = sq_dist * ((2 - dot_nn) ** 2)
-            window_c = (-d2_c / scale_sq2).exp()  # (N, chunk)
+                diff_x = vj[None, :, :] - vi[:, None, :]  # (chunk_i, chunk_j, 3)
+                diff_n = nj[None, :, :] - ni[:, None, :]    # (chunk_i, chunk_j, 3)
 
-            P_c = torch.einsum('iac,ijc->ija', uv, diff_x)  # (N, chunk, 2)
-            Q_c = torch.einsum('iac,ijc->ija', uv, diff_n)  # (N, chunk, 2)
-            PQ_c = torch.cat([P_c, Q_c], dim=-1)  # (N, chunk, 4)
+                sq_dist = (diff_x ** 2).sum(-1)  # (chunk_i, chunk_j)
+                dot_nn = (ni[:, None, :] * nj[None, :, :]).sum(-1)  # (chunk_i, chunk_j)
+                d2_c = sq_dist * ((2 - dot_nn) ** 2)
+                window_c = (-d2_c / scale_sq2).exp()  # (chunk_i, chunk_j)
 
-            PPQ_c = P_c[:, :, :, None] * PQ_c[:, :, None, :]  # (N, chunk, 2, 4)
-            C = j1 - j0
-            PPQ_c = PPQ_c.reshape(N, C, 8)
-            PPQ_c = window_c[:, :, None] * PPQ_c
+                P_c = torch.einsum('iac,ijc->ija', uv_i, diff_x)  # (chunk_i, chunk_j, 2)
+                Q_c = torch.einsum('iac,ijc->ija', uv_i, diff_n)  # (chunk_i, chunk_j, 2)
+                PQ_c = torch.cat([P_c, Q_c], dim=-1)  # (chunk_i, chunk_j, 4)
 
-            if batch is not None:
-                mask_c = (batch[:, None] == batch[None, j0:j1])  # (N, chunk)
-                PPQ_c = PPQ_c * mask_c[:, :, None].float()
+                PPQ_c = P_c[:, :, :, None] * PQ_c[:, :, None, :]  # (chunk_i, chunk_j, 2, 4)
+                Cj = j1 - j0
+                PPQ_c = PPQ_c.reshape(Ci, Cj, 8)
+                PPQ_c = window_c[:, :, None] * PPQ_c
 
-            PPt_PQt = PPt_PQt + PPQ_c.sum(1)  # (N, 8)
+                if batch is not None:
+                    mask_c = (batch[i0:i1, None] == batch[None, j0:j1])  # (chunk_i, chunk_j)
+                    PPQ_c = PPQ_c * mask_c[:, :, None].float()
+
+                PPt_PQt[i0:i1] = PPt_PQt[i0:i1] + PPQ_c.sum(1)  # (chunk_i, 8)
 
         # Reshape to get the two covariance matrices:
         PPt_PQt = PPt_PQt.view(N, 2, 2, 2)
@@ -748,39 +759,45 @@ class dMaSIFConv(nn.Module):
             A_2 = self.conv[2].weight  # (H, C)
             B_2 = self.conv[2].bias    # (H,)
 
-        # Chunked aggregation over j (source points) to avoid O(N²) memory:
+        # Chunked aggregation over both i and j (source points) to avoid O(N²) memory:
         result = torch.zeros(N, H, device=points.device, dtype=features.dtype)
 
-        for j0 in range(0, N, _CHUNK_SIZE):
-            j1 = min(j0 + _CHUNK_SIZE, N)
-            pj = points[j0:j1, :]   # (chunk, 3)
-            nj = normals[j0:j1, :]  # (chunk, 3)
+        for i0 in range(0, N, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, N)
+            pi = points[i0:i1, :]      # (chunk_i, 3)
+            ni = normals[i0:i1, :]     # (chunk_i, 3)
+            nuv_i = nuv_matrix[i0:i1, :, :]  # (chunk_i, 3, 3)
 
-            diff = pj[None, :, :] - points[:, None, :]  # (N, chunk, 3)
-            sq_dist = (diff ** 2).sum(-1)  # (N, chunk)
-            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
-            d2 = sq_dist * ((2 - dot_nn) ** 2)
-            window = (-d2).exp()  # (N, chunk)
+            for j0 in range(0, N, _CHUNK_SIZE):
+                j1 = min(j0 + _CHUNK_SIZE, N)
+                pj = points[j0:j1, :]   # (chunk_j, 3)
+                nj = normals[j0:j1, :]  # (chunk_j, 3)
 
-            X_ij = torch.einsum('iac,ijc->ija', nuv_matrix, diff)  # (N, chunk, 3)
+                diff = pj[None, :, :] - pi[:, None, :]  # (chunk_i, chunk_j, 3)
+                sq_dist = (diff ** 2).sum(-1)  # (chunk_i, chunk_j)
+                dot_nn = (ni[:, None, :] * nj[None, :, :]).sum(-1)  # (chunk_i, chunk_j)
+                d2 = sq_dist * ((2 - dot_nn) ** 2)
+                window = (-d2).exp()  # (chunk_i, chunk_j)
 
-            if self.cheap:
-                X_conv = torch.einsum('ijk,hk->ijh', X_ij, A) + B_bias[None, None, :]
-                X_conv = X_conv.relu()  # (N, chunk, H)
-            else:
-                X_conv = torch.einsum('ijk,ck->ijc', X_ij, A_1) + B_1[None, None, :]
-                X_conv = X_conv.relu()
-                X_conv = torch.einsum('ijc,hc->ijh', X_conv, A_2) + B_2[None, None, :]
-                X_conv = X_conv.relu()  # (N, chunk, H)
+                X_ij = torch.einsum('iac,ijc->ija', nuv_i, diff)  # (chunk_i, chunk_j, 3)
 
-            f_j = features[j0:j1, :][None, :, :]  # (1, chunk, H)
-            F_ij = window[:, :, None] * X_conv * f_j  # (N, chunk, H)
+                if self.cheap:
+                    X_conv = torch.einsum('ijk,hk->ijh', X_ij, A) + B_bias[None, None, :]
+                    X_conv = X_conv.relu()  # (chunk_i, chunk_j, H)
+                else:
+                    X_conv = torch.einsum('ijk,ck->ijc', X_ij, A_1) + B_1[None, None, :]
+                    X_conv = X_conv.relu()
+                    X_conv = torch.einsum('ijc,hc->ijh', X_conv, A_2) + B_2[None, None, :]
+                    X_conv = X_conv.relu()  # (chunk_i, chunk_j, H)
 
-            if point_batch is not None:
-                mask_c = (point_batch[:, None] == point_batch[None, j0:j1])  # (N, chunk)
-                F_ij = F_ij * mask_c[:, :, None].float()
+                f_j = features[j0:j1, :][None, :, :]  # (1, chunk_j, H)
+                F_ij = window[:, :, None] * X_conv * f_j  # (chunk_i, chunk_j, H)
 
-            result = result + F_ij.sum(dim=1)
+                if point_batch is not None:
+                    mask_c = (point_batch[i0:i1, None] == point_batch[None, j0:j1])  # (chunk_i, chunk_j)
+                    F_ij = F_ij * mask_c[:, :, None].float()
+
+                result[i0:i1] = result[i0:i1] + F_ij.sum(dim=1)
 
         features = result  # (N, H)
 

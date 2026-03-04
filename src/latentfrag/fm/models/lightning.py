@@ -103,6 +103,12 @@ class LatentFrag(pl.LightningModule):
         self.val_dataset = None
         self.test_dataset = None
         self.data_transform = None
+
+        # Accumulate step outputs for epoch-end hooks
+        # (compatible with both Lightning 1.x and 2.x)
+        self._train_step_outputs = []
+        self._val_step_outputs = []
+
         self.debug = debug
         self.overfit = overfit
         self.const_zt = const_zt
@@ -388,8 +394,10 @@ class LatentFrag(pl.LightningModule):
             pearson_corr = torch.corrcoef(torch.stack([timesteps, eps_norm], dim=0))[0, 1]
             self.log(f'corr_eps_timestep/{prefix}', pearson_corr, prog_bar=False)
 
-    def training_epoch_end(self, training_step_outputs):
-        self.aggregate_metrics(training_step_outputs, 'train')
+    def on_train_epoch_end(self):
+        if self._train_step_outputs:
+            self.aggregate_metrics(self._train_step_outputs, 'train')
+        self._train_step_outputs.clear()
 
     def compute_loss(self, ligand, pocket, return_info=False):
         """
@@ -513,7 +521,9 @@ class LatentFrag(pl.LightningModule):
 
         self.log_metrics({'loss': loss, **log_dict}, 'train',
                          batch_size=len(ligand['size']))
-        return {f'{self.prefix}loss': loss, **info}
+        out = {f'{self.prefix}loss': loss, **info}
+        self._train_step_outputs.append(out)
+        return out
 
     def validation_step(self, data, *args):
         rdmols, rdpockets, frag_embeddings, x_emb_pred, x_emb_gt, _, smiles = self.sample(
@@ -528,7 +538,7 @@ class LatentFrag(pl.LightningModule):
         else:
             smiles_gt = None
 
-        return {
+        out = {
             'ligands': rdmols,
             'pockets': rdpockets,
             'frag_embeddings': frag_embeddings,
@@ -538,8 +548,11 @@ class LatentFrag(pl.LightningModule):
             'smiles_gt': smiles_gt,
             'smiles_pred': smiles,
         }
+        self._val_step_outputs.append(out)
+        return out
 
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self):
+        validation_step_outputs = self._val_step_outputs
         outdir = Path(self.outdir, f'epoch_{self.current_epoch}')
 
         rdmols = [m for x in validation_step_outputs for m in x['ligands']]
@@ -623,6 +636,8 @@ class LatentFrag(pl.LightningModule):
 
             self.log_metrics(info, 'val')
             print(f'Chain visualization took {time() - tic:.2f} seconds')
+
+        self._val_step_outputs.clear()
 
     def analyze_sample(self, rdmols, atom_types, bond_types, frag_types,
                        x_emb_pred, x_emb_gt, receptors=None, smiles_gt=None, smiles_pred=None):
@@ -995,8 +1010,9 @@ class LatentFrag(pl.LightningModule):
 
         return ligand_chain, pocket_chain, info
 
-    def configure_gradient_clipping(self, optimizer, optimizer_idx,
-                                    gradient_clip_val, gradient_clip_algorithm):
+    def configure_gradient_clipping(self, optimizer, *args,
+                                    gradient_clip_val=None,
+                                    gradient_clip_algorithm=None, **kwargs):
 
         if not self.clip_grad:
             return
