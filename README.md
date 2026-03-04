@@ -6,6 +6,57 @@ This work proposes a protein-fragment encoder that is trained contrastively betw
 
 ## Installation
 
+### Option A: Modern environment (recommended)
+
+Tested with Python 3.10, 3.11, and 3.12 using PyTorch 2.1+ and CUDA 12.1+.
+
+```bash
+cd LatentFrag
+bash install.sh              # creates 'latentfrag' env with Python 3.11
+# or: bash install.sh myenv 3.12   # custom env name / Python version
+
+conda activate latentfrag
+python test_setup.py         # verify
+```
+
+<details>
+<summary>Manual installation steps</summary>
+
+```bash
+conda create --name latentfrag python=3.11 -y
+conda activate latentfrag
+
+# PyTorch + geometric
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121
+pip install torch-geometric==2.3.1
+pip install torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+
+# Core scientific deps
+pip install "numpy<2" "setuptools<81"
+pip install pytorch-lightning==2.1.0 wandb biopython pdb-tools ProDy plyfile pyvtk
+pip install rdkit-pypi pandas matplotlib jupyter   # use 'rdkit' instead of 'rdkit-pypi' for Python 3.12
+pip install posebusters fcd useful-rdkit-utils
+
+# C++ standard library fix (needed on most systems)
+conda install -c conda-forge libstdcxx-ng -y
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d" "$CONDA_PREFIX/etc/conda/deactivate.d"
+echo 'export _OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"' > "$CONDA_PREFIX/etc/conda/activate.d/libstdcxx.sh"
+echo 'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' >> "$CONDA_PREFIX/etc/conda/activate.d/libstdcxx.sh"
+echo 'export LD_LIBRARY_PATH="$_OLD_LD_LIBRARY_PATH"; unset _OLD_LD_LIBRARY_PATH' > "$CONDA_PREFIX/etc/conda/deactivate.d/libstdcxx.sh"
+conda deactivate && conda activate latentfrag
+
+# Install LatentFrag
+cd LatentFrag
+pip install -e .
+```
+
+</details>
+
+### Option B: Legacy environment (Python 3.7)
+
+<details>
+<summary>Click to expand legacy install instructions</summary>
+
 ```bash
 conda create --name latentfrag python=3.7 -y
 conda activate latentfrag
@@ -14,8 +65,6 @@ conda install cmake==3.27.4 -y
 conda install cudatoolkit=11.3 -y
 conda install cudatoolkit-dev=11.7 -c conda-forge -y
 conda install cudnn=8.2.1 -y
-
-conda install -c conda-forge openbabel=3.0.0
 
 pip install --upgrade pip
 pip cache purge
@@ -28,13 +77,13 @@ pip install pandas matplotlib jupyter pytorch-lightning==1.8.0 wandb==0.13.4 rdk
 pip install plyfile==0.7.2 pyvtk==0.5.18
 pip install --no-index torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
 conda install -c conda-forge imageio
-pip install posebusters==0.2.12
-pip install fcd==1.2
-pip install useful-rdkit-utils
+pip install posebusters fcd useful-rdkit-utils
 
 cd LatentFrag
 pip install -e .
 ```
+
+</details>
 
 Test the installation:
 

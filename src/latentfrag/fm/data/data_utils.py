@@ -15,7 +15,13 @@ from torch_scatter import scatter_mean
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from Bio.PDB import StructureBuilder, PDBParser
-from Bio.PDB.Polypeptide import three_to_one, is_aa
+from Bio.PDB.Polypeptide import is_aa
+try:
+    from Bio.PDB.Polypeptide import three_to_one
+except ImportError:
+    from Bio.PDB.Polypeptide import protein_letters_3to1
+    def three_to_one(s):
+        return protein_letters_3to1[s]
 from scipy.ndimage import gaussian_filter
 
 from latentfrag.fm.data.normal_modes import pdb_to_normal_modes

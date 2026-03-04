@@ -265,7 +265,10 @@ def check_equivalence():
             continue
 
         print(f"Testing {name}...", end=" ", flush=True)
-        ref = torch.load(ref_path)
+        load_kwargs = {}
+        if tuple(int(x) for x in torch.__version__.split('+')[0].split('.')[:2]) >= (1, 13):
+            load_kwargs['weights_only'] = True
+        ref = torch.load(ref_path, **load_kwargs)
 
         try:
             results = test_fn(data)
