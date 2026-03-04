@@ -1,7 +1,4 @@
-import tempfile
-
 from rdkit import Chem
-from openbabel import openbabel
 
 
 def read_xyz_file(path):
@@ -46,29 +43,3 @@ def pointcloud_to_pdb(filename, coords, feature=None, show_as='HETATM'):
 
     with open(filename, 'w') as f:
         f.write(out)
-
-
-def xyz_to_rdmol(xyz_file):
-    """
-    Build an RDKit molecule using openbabel for creating bonds
-    Args:
-        xyz_file: Path to the .xyz file
-    Returns:
-        rdkit molecule
-    """
-
-    with tempfile.NamedTemporaryFile() as tmp:
-        tmp_file = tmp.name
-
-        # Convert to sdf file with openbabel
-        # openbabel will add bonds
-        obConversion = openbabel.OBConversion()
-        obConversion.SetInAndOutFormats("xyz", "sdf")
-        ob_mol = openbabel.OBMol()
-        obConversion.ReadFile(ob_mol, str(xyz_file))
-        obConversion.WriteFile(ob_mol, tmp_file)
-
-        # Read sdf file with RDKit
-        mol = Chem.SDMolSupplier(tmp_file, sanitize=False)[0]
-
-    return mol

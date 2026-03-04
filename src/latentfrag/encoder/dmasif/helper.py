@@ -39,7 +39,7 @@ def soft_dimension(features):
     Let "s" denote the (D,) vector of eigenvalues of Cov,
     the (D, D) covariance matrix of the sample "features".
     Then,
-        R(features) = \sum_i sqrt(s_i) / \max_i sqrt(s_i)
+        R(features) = \\sum_i sqrt(s_i) / \\max_i sqrt(s_i)
 
     This quantity encodes the number of PCA components that would be
     required to describe the sample with a good precision.

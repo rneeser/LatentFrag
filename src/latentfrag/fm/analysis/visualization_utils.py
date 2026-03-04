@@ -3,7 +3,13 @@ import warnings
 
 import torch
 from rdkit import Chem
-from Bio.PDB.Polypeptide import one_to_three
+try:
+    from Bio.PDB.Polypeptide import one_to_three
+except ImportError:
+    from Bio.PDB.Polypeptide import protein_letters_3to1
+    _one_to_three = {v: k for k, v in protein_letters_3to1.items()}
+    def one_to_three(s):
+        return _one_to_three[s]
 
 from latentfrag.fm.data.molecule_builder import build_molecule
 
@@ -26,6 +32,9 @@ def mols_to_pdbfile(rdmols, filename, flavor=0):
 
 def pocket_to_rdkit(pocket, pocket_representation, atom_encoder=None,
                     atom_decoder=None, aa_decoder=None, aa_atom_index=None):
+
+    # Move all tensors to CPU for RDKit/PDB construction
+    pocket = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in pocket.items()}
 
     rdpockets = []
     for i in torch.unique(pocket['mask']):

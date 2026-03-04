@@ -1,33 +1,47 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pykeops.torch import LazyTensor
 
 from latentfrag.encoder.dmasif.geometry_processing import (
     curvatures,
     mesh_normals_areas,
     tangent_vectors,
-    dMaSIFConv
+    dMaSIFConv,
+    _batch_mask,
+    _CHUNK_SIZE,
 )
-from latentfrag.encoder.dmasif.helper import diagonal_ranges
+from latentfrag.encoder.dmasif.helper import ranges_slices
 
 
 def knn_atoms(x, y, x_batch, y_batch, k):
-    N, D = x.shape
-    x_i = LazyTensor(x[:, None, :])
-    y_j = LazyTensor(y[None, :, :])
+    """K-nearest-neighbor search with batch support.
 
-    pairwise_distance_ij = ((x_i - y_j) ** 2).sum(-1)
-    pairwise_distance_ij.ranges = diagonal_ranges(x_batch, y_batch)
+    For every point in *x* find the *k* closest points in *y*, respecting
+    the batch assignment given by *x_batch* / *y_batch*.
 
-    # N.B.: KeOps doesn't yet support backprop through Kmin reductions...
-    # dists, idx = pairwise_distance_ij.Kmin_argKmin(K=k,axis=1)
-    # So we have to re-compute the values ourselves:
-    idx = pairwise_distance_ij.argKmin(K=k, axis=1)  # (N, K)
-    x_ik = y[idx.view(-1)].view(N, k, D)
-    dists = ((x[:, None, :] - x_ik) ** 2).sum(-1)
+    Returns:
+        idx  (N, K) long – indices into *y*
+        dists (N, K) float – squared distances
+    """
+    N = x.shape[0]
 
-    return idx, dists
+    # Chunked over rows to avoid O(N*M) peak memory
+    idx_list = []
+    dists_list = []
+
+    for i0 in range(0, N, _CHUNK_SIZE):
+        i1 = min(i0 + _CHUNK_SIZE, N)
+        pw = ((x[i0:i1, None, :] - y[None, :, :]) ** 2).sum(-1)  # (chunk, M)
+
+        if x_batch is not None:
+            mask_c = (x_batch[i0:i1, None] == y_batch[None, :])  # (chunk, M)
+            pw = pw.masked_fill(~mask_c, float('inf'))
+
+        d, idx = pw.topk(k, dim=1, largest=False, sorted=True)
+        idx_list.append(idx)
+        dists_list.append(d)
+
+    return torch.cat(idx_list, dim=0), torch.cat(dists_list, dim=0)
 
 
 def get_atom_features(x, y, x_batch, y_batch, y_atomtype, k=16):
@@ -281,15 +295,21 @@ class dMaSIFConv_seg(torch.nn.Module):
         The routine updates the model attributes:
         - points, i.e. the point cloud itself,
         - nuv, a local oriented basis in R^3 for every point,
-        - ranges, custom KeOps syntax to implement batch processing.
+        - ranges, batch ranges for masking in convolution layers.
         """
 
         # 1. Save the vertices for later use in the convolutions ---------------
         self.points = xyz
         self.batch = batch
-        self.ranges = diagonal_ranges(
-            batch
-        )  # KeOps support for heterogeneous batch processing
+
+        # Build ranges tuple (kept for API compat with dMaSIFConv.forward)
+        if batch is not None:
+            range_info, _ = ranges_slices(batch)
+            # Wrap into the tuple format that dMaSIFConv.forward expects
+            self.ranges = (range_info,)
+        else:
+            self.ranges = None
+
         self.triangles = triangles
         self.normals = normals
         self.weights = weights
@@ -304,36 +324,34 @@ class dMaSIFConv_seg(torch.nn.Module):
         tangent_bases = tangent_vectors(normals)  # Tangent basis (N, 2, 3)
 
         # 3. Steer the tangent bases according to the gradient of "weights" ----
+        N = points.shape[0]
+        uv_mat = tangent_bases.view(N, 2, 3)  # (N, 2, 3)
 
-        # 3.a) Encoding as KeOps LazyTensors:
-        # Orientation scores:
-        weights_j = LazyTensor(weights.view(1, -1, 1))  # (1, N, 1)
-        # Vertices:
-        x_i = LazyTensor(points[:, None, :])  # (N, 1, 3)
-        x_j = LazyTensor(points[None, :, :])  # (1, N, 3)
-        # Normals:
-        n_i = LazyTensor(normals[:, None, :])  # (N, 1, 3)
-        n_j = LazyTensor(normals[None, :, :])  # (1, N, 3)
-        # Tangent basis:
-        uv_i = LazyTensor(tangent_bases.view(-1, 1, 6))  # (N, 1, 6)
+        # Chunked aggregation over j to avoid O(N²) memory
+        orientation_vector_i = torch.zeros(N, 2, device=points.device, dtype=points.dtype)
 
-        # 3.b) Pseudo-geodesic window:
-        # Pseudo-geodesic squared distance:
-        rho2_ij = ((x_j - x_i) ** 2).sum(-1) * ((2 - (n_i | n_j)) ** 2)  # (N, N, 1)
-        # Gaussian window:
-        window_ij = (-rho2_ij).exp()  # (N, N, 1)
+        for j0 in range(0, N, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, N)
+            pj = points[j0:j1, :]   # (chunk, 3)
+            nj = normals[j0:j1, :]  # (chunk, 3)
 
-        # 3.c) Coordinates in the (u, v) basis - not oriented yet:
-        X_ij = uv_i.matvecmult(x_j - x_i)  # (N, N, 2)
+            diff = pj[None, :, :] - points[:, None, :]  # (N, chunk, 3)
+            sq_dist = (diff ** 2).sum(-1)  # (N, chunk)
+            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
+            rho2 = sq_dist * ((2 - dot_nn) ** 2)
+            window = (-rho2).exp()  # (N, chunk)
 
-        # 3.d) Local average in the tangent plane:
-        orientation_weight_ij = window_ij * weights_j  # (N, N, 1)
-        orientation_vector_ij = orientation_weight_ij * X_ij  # (N, N, 2)
+            X_c = torch.einsum('iac,ijc->ija', uv_mat, diff)  # (N, chunk, 2)
 
-        # Support for heterogeneous batch processing:
-        orientation_vector_ij.ranges = self.ranges  # Block-diagonal sparsity mask
+            w_j = weights[j0:j1].view(1, -1)  # (1, chunk)
+            ow_c = window * w_j  # (N, chunk)
+            ov_c = ow_c[:, :, None] * X_c  # (N, chunk, 2)
 
-        orientation_vector_i = orientation_vector_ij.sum(dim=1)  # (N, 2)
+            if batch is not None:
+                mask_c = (batch[:, None] == batch[None, j0:j1])  # (N, chunk)
+                ov_c = ov_c * mask_c[:, :, None].float()
+
+            orientation_vector_i = orientation_vector_i + ov_c.sum(dim=1)  # (N, 2)
         orientation_vector_i = (
             orientation_vector_i + 1e-5
         )  # Just in case someone's alone...

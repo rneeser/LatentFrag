@@ -4,13 +4,57 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pykeops.torch import LazyTensor
-from pykeops.torch.cluster import grid_cluster
 
-from latentfrag.encoder.dmasif.helper import diagonal_ranges
+from latentfrag.encoder.dmasif.helper import ranges_slices
 
-# import pykeops
-# pykeops.clean_pykeops()
+# Maximum number of source points to process at once in pairwise operations.
+# Reduces peak GPU memory from O(N²) to O(N × _CHUNK_SIZE).
+_CHUNK_SIZE = 2048
+
+
+def _batch_mask(batch_x, batch_y=None):
+    """Build a boolean (N, M) batch-diagonal mask from batch vectors.
+
+    Returns None when no batching is needed.
+    """
+    if batch_x is None:
+        return None
+    if batch_y is None:
+        batch_y = batch_x
+    return batch_x[:, None] == batch_y[None, :]  # (N, M)
+
+
+def grid_cluster(x, size):
+    """Distribute points into cubic bins (reimplemented from pykeops).
+
+    Args:
+        x ((M,D) Tensor): point positions.
+        size (float): side length of cubic cells.
+
+    Returns:
+        (M,) int32 Tensor of cluster labels.
+    """
+    with torch.no_grad():
+        if x.shape[1] == 1:
+            weights = torch.IntTensor([1]).to(x.device)
+        elif x.shape[1] == 2:
+            weights = torch.IntTensor([2 ** 10, 1]).to(x.device)
+        elif x.shape[1] == 3:
+            weights = torch.IntTensor([2 ** 20, 2 ** 10, 1]).to(x.device)
+        else:
+            raise NotImplementedError()
+        x_ = (x / size).floor().int()
+        x_ *= weights
+        lab = x_.sum(1)
+        lab = lab - lab.min()
+
+        u_lab = torch.unique(lab).sort()[0]
+        N_lab = len(u_lab)
+        foo = torch.empty(u_lab.max() + 1, dtype=torch.int32, device=x.device)
+        foo[u_lab] = torch.arange(N_lab, dtype=torch.int32, device=x.device)
+        lab = foo[lab]
+
+    return lab
 
 
 # On-the-fly generation of the surfaces ========================================
@@ -81,51 +125,58 @@ def soft_distances(x, y, batch_x, batch_y, smoothness=0.01, atomtypes=None):
     Returns:
         Tensor: (M,) values of the soft distance function on the points `y`.
     """
-    # Build the (N, M, 1) symbolic matrix of squared distances:
-    x_i = LazyTensor(x[:, None, :])  # (N, 1, 3) atoms
-    y_j = LazyTensor(y[None, :, :])  # (1, M, 3) sampling points
-    D_ij = ((x_i - y_j) ** 2).sum(-1)  # (N, M, 1) squared distances
-
-    # Use a block-diagonal sparsity mask to support heterogeneous batch processing:
-    D_ij.ranges = diagonal_ranges(batch_x, batch_y)
+    N = x.shape[0]  # atoms
+    M = y.shape[0]  # sampling locations
 
     if atomtypes is not None:
         # Turn the one-hot encoding "atomtypes" into a vector of diameters "smoothness_i":
-        # (N, 6)  -> (N, 1, 1)  (There are 6 atom types)
-        atomic_radii = torch.cuda.FloatTensor(
-            [170, 110, 152, 155, 180, 190], device=x.device
+        atomic_radii = torch.tensor(
+            [170, 110, 152, 155, 180, 190], dtype=torch.float32, device=x.device
         )
         atomic_radii = atomic_radii / atomic_radii.min()
-        atomtype_radii = atomtypes * atomic_radii[None, :]  # n_atoms, n_atomtypes
-        # smoothness = atomtypes @ atomic_radii  # (N, 6) @ (6,) = (N,)
-        smoothness = torch.sum(
+        atomtype_radii = atomtypes * atomic_radii[None, :]
+        smoothness_vec = torch.sum(
             smoothness * atomtype_radii, dim=1, keepdim=False
-        )  # n_atoms, 1
-        smoothness_i = LazyTensor(smoothness[:, None, None])
+        )  # (N,)
 
-        # Compute an estimation of the mean smoothness in a neighborhood
-        # of each sampling point:
-        # density = (-D_ij.sqrt()).exp().sum(0).view(-1)  # (M,) local density of atoms
-        # smooth = (smoothness_i * (-D_ij.sqrt()).exp()).sum(0).view(-1)  # (M,)
-        # mean_smoothness = smooth / density  # (M,)
+        # Chunked accumulation over atoms to avoid O(N*M) memory
+        denom = torch.zeros(M, device=y.device, dtype=y.dtype)
+        numer = torch.zeros(M, device=y.device, dtype=y.dtype)
+        lse_accum = torch.full((M,), float('-inf'), device=y.device, dtype=y.dtype)
 
-        # soft_dists = -mean_smoothness * (
-        #    (-D_ij.sqrt() / smoothness_i).logsumexp(dim=0)
-        # ).view(-1)
-        mean_smoothness = (-D_ij.sqrt()).exp().sum(0)
-        mean_smoothness_j = LazyTensor(mean_smoothness[None, :, :])
-        mean_smoothness = (
-            smoothness_i * (-D_ij.sqrt()).exp() / mean_smoothness_j
-        )  # n_atoms, n_points, 1
-        mean_smoothness = mean_smoothness.sum(0).view(-1)
-        soft_dists = -mean_smoothness * (
-            (-D_ij.sqrt() / smoothness_i).logsumexp(dim=0)
-        ).view(-1)
+        for i0 in range(0, N, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, N)
+            D_c = ((x[i0:i1, None, :] - y[None, :, :]) ** 2).sum(-1)  # (C, M)
+            neg_sqrt = -D_c.sqrt()
+            exp_c = neg_sqrt.exp()
+            s_c = smoothness_vec[i0:i1, None]  # (C, 1)
+
+            if batch_x is not None:
+                mask_c = (batch_x[i0:i1, None] == batch_y[None, :])  # (C, M)
+                exp_c = exp_c * mask_c.float()
+
+            denom = denom + exp_c.sum(0)
+            numer = numer + (s_c * exp_c).sum(0)
+
+            val_c = neg_sqrt / s_c  # (C, M)
+            if batch_x is not None:
+                val_c = val_c.masked_fill(~mask_c, float('-inf'))
+            lse_accum = torch.logaddexp(lse_accum, val_c.logsumexp(dim=0))
+
+        mean_smoothness = numer / denom
+        soft_dists = -mean_smoothness * lse_accum
 
     else:
-        soft_dists = -smoothness * ((-D_ij.sqrt() / smoothness).logsumexp(dim=0)).view(
-            -1
-        )
+        lse_accum = torch.full((M,), float('-inf'), device=y.device, dtype=y.dtype)
+        for i0 in range(0, N, _CHUNK_SIZE):
+            i1 = min(i0 + _CHUNK_SIZE, N)
+            D_c = ((x[i0:i1, None, :] - y[None, :, :]) ** 2).sum(-1)  # (C, M)
+            val_c = -D_c.sqrt() / smoothness
+            if batch_x is not None:
+                mask_c = (batch_x[i0:i1, None] == batch_y[None, :])  # (C, M)
+                val_c = val_c.masked_fill(~mask_c, float('-inf'))
+            lse_accum = torch.logaddexp(lse_accum, val_c.logsumexp(dim=0))
+        soft_dists = -smoothness * lse_accum
 
     return soft_dists
 
@@ -318,28 +369,45 @@ def mesh_normals_areas(vertices, triangles=None, scale=[1.0], batch=None, normal
         V = normals
         centers = vertices
 
-    # Normal of a vertex = average of all normals in a ball of size "scale":
-    x_i = LazyTensor(vertices[:, None, :])  # (N, 1, 3)
-    y_j = LazyTensor(centers[None, :, :])  # (1, M, 3)
-    v_j = LazyTensor(V[None, :, :])  # (1, M, 3)
-    s = LazyTensor(scales[None, None, :])  # (1, 1, S)
+    # Normal of a vertex = average of all normals in a ball of size "scale".
+    # Chunked over source points to avoid O(N*M) memory.
+    Nv = vertices.shape[0]
+    M = centers.shape[0]
 
-    D_ij = ((x_i - y_j) ** 2).sum(-1)  # (N, M, 1)
-    K_ij = (-D_ij / (2 * s ** 2)).exp()  # (N, M, S)
-
-    # Support for heterogeneous batch processing:
     if batch is not None:
         batch_vertices = batch
         batch_centers = batch[triangles[0, :]] if triangles is not None else batch
-        K_ij.ranges = diagonal_ranges(batch_vertices, batch_centers)
+    else:
+        batch_vertices = None
+        batch_centers = None
 
     if single_scale:
-        U = (K_ij * v_j).sum(dim=1)  # (N, 3)
+        U = torch.zeros(Nv, 3, device=vertices.device, dtype=vertices.dtype)
+        scale_sq2 = 2 * (scales[0] ** 2)
+        for j0 in range(0, M, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, M)
+            D_c = ((vertices[:, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)  # (Nv, chunk)
+            K_c = (-D_c / scale_sq2).exp()
+            if batch_vertices is not None:
+                mask_c = (batch_vertices[:, None] == batch_centers[None, j0:j1])
+                K_c = K_c * mask_c.float()
+            U = U + (K_c[:, :, None] * V[None, j0:j1, :]).sum(dim=1)
     else:
-        U = (K_ij.tensorprod(v_j)).sum(dim=1)  # (N, S*3)
-        U = U.view(-1, len(scales), 3)  # (N, S, 3)
+        S = len(scales)
+        U = torch.zeros(Nv, S, 3, device=vertices.device, dtype=vertices.dtype)
+        for j0 in range(0, M, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, M)
+            D_c = ((vertices[:, None, :] - centers[None, j0:j1, :]) ** 2).sum(-1)  # (Nv, chunk)
+            if batch_vertices is not None:
+                mask_c = (batch_vertices[:, None] == batch_centers[None, j0:j1])
+            V_c = V[j0:j1, :]
+            for s_idx in range(S):
+                K_s = (-D_c / (2 * scales[s_idx] ** 2)).exp()
+                if batch_vertices is not None:
+                    K_s = K_s * mask_c.float()
+                U[:, s_idx, :] = U[:, s_idx, :] + (K_s[:, :, None] * V_c[None, :, :]).sum(dim=1)
 
-    normals = F.normalize(U, p=2, dim=-1)  # (N, 3) or (N, S, 3)
+    normals = F.normalize(U, p=2, dim=-1)  # (Nv, 3) or (Nv, S, 3)
 
     return normals, areas
 
@@ -417,8 +485,6 @@ def curvatures(
     """
     # Number of points, number of scales:
     N, S = vertices.shape[0], len(scales)
-    ranges = diagonal_ranges(batch)
-
     # Compute the normals at different scales + vertice areas:
     normals_s, _ = mesh_normals_areas(
         vertices, triangles=triangles, normals=normals, scale=scales, batch=batch
@@ -434,34 +500,37 @@ def curvatures(
         normals = normals_s[:, s, :].contiguous()  # (N, 3)
         uv = uv_s[:, s, :, :].contiguous()  # (N, 2, 3)
 
-        # Encode as symbolic tensors:
-        # Points:
-        x_i = LazyTensor(vertices.view(N, 1, 3))
-        x_j = LazyTensor(vertices.view(1, N, 3))
-        # Normals:
-        n_i = LazyTensor(normals.view(N, 1, 3))
-        n_j = LazyTensor(normals.view(1, N, 3))
-        # Tangent bases:
-        uv_i = LazyTensor(uv.view(N, 1, 6))
+        # Chunked aggregation over j to avoid O(N²) memory
+        scale_sq2 = 2 * (scale ** 2)
+        PPt_PQt = torch.zeros(N, 8, device=vertices.device, dtype=vertices.dtype)
 
-        # Pseudo-geodesic squared distance:
-        d2_ij = ((x_j - x_i) ** 2).sum(-1) * ((2 - (n_i | n_j)) ** 2)  # (N, N, 1)
-        # Gaussian window:
-        window_ij = (-d2_ij / (2 * (scale ** 2))).exp()  # (N, N, 1)
+        for j0 in range(0, N, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, N)
+            vj = vertices[j0:j1, :]  # (chunk, 3)
+            nj = normals[j0:j1, :]   # (chunk, 3)
 
-        # Project on the tangent plane:
-        P_ij = uv_i.matvecmult(x_j - x_i)  # (N, N, 2)
-        Q_ij = uv_i.matvecmult(n_j - n_i)  # (N, N, 2)
-        # Concatenate:
-        PQ_ij = P_ij.concat(Q_ij)  # (N, N, 2+2)
+            diff_x = vj[None, :, :] - vertices[:, None, :]  # (N, chunk, 3)
+            diff_n = nj[None, :, :] - normals[:, None, :]    # (N, chunk, 3)
 
-        # Covariances, with a scale-dependent weight:
-        PPt_PQt_ij = P_ij.tensorprod(PQ_ij)  # (N, N, 2*(2+2))
-        PPt_PQt_ij = window_ij * PPt_PQt_ij  # (N, N, 2*(2+2))
+            sq_dist = (diff_x ** 2).sum(-1)  # (N, chunk)
+            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
+            d2_c = sq_dist * ((2 - dot_nn) ** 2)
+            window_c = (-d2_c / scale_sq2).exp()  # (N, chunk)
 
-        # Reduction - with batch support:
-        PPt_PQt_ij.ranges = ranges
-        PPt_PQt = PPt_PQt_ij.sum(1)  # (N, 2*(2+2))
+            P_c = torch.einsum('iac,ijc->ija', uv, diff_x)  # (N, chunk, 2)
+            Q_c = torch.einsum('iac,ijc->ija', uv, diff_n)  # (N, chunk, 2)
+            PQ_c = torch.cat([P_c, Q_c], dim=-1)  # (N, chunk, 4)
+
+            PPQ_c = P_c[:, :, :, None] * PQ_c[:, :, None, :]  # (N, chunk, 2, 4)
+            C = j1 - j0
+            PPQ_c = PPQ_c.reshape(N, C, 8)
+            PPQ_c = window_c[:, :, None] * PPQ_c
+
+            if batch is not None:
+                mask_c = (batch[:, None] == batch[None, j0:j1])  # (N, chunk)
+                PPQ_c = PPQ_c * mask_c[:, :, None].float()
+
+            PPt_PQt = PPt_PQt + PPQ_c.sum(1)  # (N, 8)
 
         # Reshape to get the two covariance matrices:
         PPt_PQt = PPt_PQt.view(N, 2, 2, 2)
@@ -487,18 +556,6 @@ def curvatures(
 
 
 # Fast tangent convolution layer ===============================================
-class ContiguousBackward(torch.autograd.Function):
-    """
-    Function to ensure contiguous gradient in backward pass. To be applied after PyKeOps reduction.
-    N.B.: This workaround fixes a bug that will be fixed in ulterior KeOp releases.
-    """
-    @staticmethod
-    def forward(ctx, input):
-        return input
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.contiguous()
 
 
 class dMaSIFConv(nn.Module):
@@ -643,11 +700,9 @@ class dMaSIFConv(nn.Module):
             points (Tensor): (N,3) point coordinates `x_i`.
             nuv (Tensor): (N,3,3) local coordinate systems `[n_i,u_i,v_i]`.
             features (Tensor): (N,I) input feature vectors `f_i`.
-            ranges (6-uple of integer Tensors, optional): low-level format
-                to support batch processing, as described in the KeOps documentation.
-                In practice, this will be built by a higher-level object
-                to encode the relevant "batch vectors" in a way that is convenient
-                for the KeOps CUDA engine. Defaults to None.
+            ranges (6-uple of integer Tensors, optional): batch ranges (kept
+                for API compatibility). When provided, the first element is
+                used to extract batch boundaries for masking. Defaults to None.
 
         Returns:
             (Tensor): (N,O) output feature vectors `f'_i`.
@@ -660,90 +715,74 @@ class dMaSIFConv(nn.Module):
         features = features[0].transpose(1, 0).contiguous()  # (1, H, N) -> (N, H)
 
         # 2. Compute the local "shape contexts": -------------------------------
+        N = points.shape[0]
+        H = features.shape[1]
 
         # 2.a Normalize the kernel radius:
         points = points / (sqrt(2.0) * self.Radius)  # (N, 3)
-
-        # 2.b Encode the variables as KeOps LazyTensors
-
-        # Vertices:
-        x_i = LazyTensor(points[:, None, :])  # (N, 1, 3)
-        x_j = LazyTensor(points[None, :, :])  # (1, N, 3)
 
         # WARNING - Here, we assume that the normals are fixed:
         normals = (
             nuv[:, 0, :].contiguous().detach()
         )  # (N, 3) - remove the .detach() if needed
+        nuv_matrix = nuv.view(N, 3, 3)  # (N, 3, 3)
 
-        # Local bases:
-        nuv_i = LazyTensor(nuv.view(-1, 1, 9))  # (N, 1, 9)
-        # Normals:
-        n_i = nuv_i[:3]  # (N, 1, 3)
+        # Derive per-point batch assignment from ranges for chunked masking:
+        if ranges is not None:
+            range_tensor = ranges[0]  # (B, 2) int tensor
+            point_batch = torch.zeros(N, dtype=torch.long, device=points.device)
+            for b_idx in range(range_tensor.shape[0]):
+                s = range_tensor[b_idx, 0].item()
+                e = range_tensor[b_idx, 1].item()
+                point_batch[s:e] = b_idx
+        else:
+            point_batch = None
 
-        n_j = LazyTensor(normals[None, :, :])  # (1, N, 3)
+        # Extract MLP parameters once:
+        if self.cheap:
+            A = self.conv[0].weight    # (H, 3)
+            B_bias = self.conv[0].bias  # (H,)
+        else:
+            A_1 = self.conv[0].weight  # (C, 3)
+            B_1 = self.conv[0].bias    # (C,)
+            A_2 = self.conv[2].weight  # (H, C)
+            B_2 = self.conv[2].bias    # (H,)
 
-        # To avoid register spilling when using large embeddings, we perform our KeOps reduction
-        # over the vector of length "self.Hidden = self.n_heads * self.heads_dim"
-        # as self.n_heads reduction over vectors of length self.heads_dim (= "Hd" in the comments).
-        head_out_features = []
-        for head in range(self.n_heads):
+        # Chunked aggregation over j (source points) to avoid O(N²) memory:
+        result = torch.zeros(N, H, device=points.device, dtype=features.dtype)
 
-            # Extract a slice of width Hd from the feature array
-            head_start = head * self.heads_dim
-            head_end = head_start + self.heads_dim
-            head_features = features[:, head_start:head_end].contiguous()  # (N, H) -> (N, Hd)
+        for j0 in range(0, N, _CHUNK_SIZE):
+            j1 = min(j0 + _CHUNK_SIZE, N)
+            pj = points[j0:j1, :]   # (chunk, 3)
+            nj = normals[j0:j1, :]  # (chunk, 3)
 
-            # Features:
-            f_j = LazyTensor(head_features[None, :, :])  # (1, N, Hd)
+            diff = pj[None, :, :] - points[:, None, :]  # (N, chunk, 3)
+            sq_dist = (diff ** 2).sum(-1)  # (N, chunk)
+            dot_nn = (normals[:, None, :] * nj[None, :, :]).sum(-1)  # (N, chunk)
+            d2 = sq_dist * ((2 - dot_nn) ** 2)
+            window = (-d2).exp()  # (N, chunk)
 
-            # Convolution parameters:
+            X_ij = torch.einsum('iac,ijc->ija', nuv_matrix, diff)  # (N, chunk, 3)
+
             if self.cheap:
-                # Extract a slice of Hd lines: (H, 3) -> (Hd, 3)
-                A = self.conv[0].weight[head_start:head_end, :].contiguous()
-                # Extract a slice of Hd coefficients: (H,) -> (Hd,)
-                B = self.conv[0].bias[head_start:head_end].contiguous()
-                AB = torch.cat((A, B[:, None]), dim=1)  # (Hd, 4)
-                ab = LazyTensor(AB.view(1, 1, -1))  # (1, 1, Hd*4)
+                X_conv = torch.einsum('ijk,hk->ijh', X_ij, A) + B_bias[None, None, :]
+                X_conv = X_conv.relu()  # (N, chunk, H)
             else:
-                A_1, B_1 = self.conv[0].weight, self.conv[0].bias  # (C, 3), (C,)
-                # Extract a slice of Hd lines: (H, C) -> (Hd, C)
-                A_2 = self.conv[2].weight[head_start:head_end, :].contiguous()
-                # Extract a slice of Hd coefficients: (H,) -> (Hd,)
-                B_2 = self.conv[2].bias[head_start:head_end].contiguous()
-                a_1 = LazyTensor(A_1.view(1, 1, -1))  # (1, 1, C*3)
-                b_1 = LazyTensor(B_1.view(1, 1, -1))  # (1, 1, C)
-                a_2 = LazyTensor(A_2.view(1, 1, -1))  # (1, 1, Hd*C)
-                b_2 = LazyTensor(B_2.view(1, 1, -1))  # (1, 1, Hd)
+                X_conv = torch.einsum('ijk,ck->ijc', X_ij, A_1) + B_1[None, None, :]
+                X_conv = X_conv.relu()
+                X_conv = torch.einsum('ijc,hc->ijh', X_conv, A_2) + B_2[None, None, :]
+                X_conv = X_conv.relu()  # (N, chunk, H)
 
-            # 2.c Pseudo-geodesic window:
-            # Pseudo-geodesic squared distance:
-            d2_ij = ((x_j - x_i) ** 2).sum(-1) * ((2 - (n_i | n_j)) ** 2)  # (N, N, 1)
-            # Gaussian window:
-            window_ij = (-d2_ij).exp()  # (N, N, 1)
+            f_j = features[j0:j1, :][None, :, :]  # (1, chunk, H)
+            F_ij = window[:, :, None] * X_conv * f_j  # (N, chunk, H)
 
-            # 2.d Local MLP:
-            # Local coordinates:
-            X_ij = nuv_i.matvecmult(x_j - x_i)  # (N, N, 9) "@" (N, N, 3) = (N, N, 3)
-            # MLP:
-            if self.cheap:
-                X_ij = ab.matvecmult(
-                    X_ij.concat(LazyTensor(1))
-                )  # (N, N, Hd*4) @ (N, N, 3+1) = (N, N, Hd)
-                X_ij = X_ij.relu()  # (N, N, Hd)
-            else:
-                X_ij = a_1.matvecmult(X_ij) + b_1  # (N, N, C)
-                X_ij = X_ij.relu()  # (N, N, C)
-                X_ij = a_2.matvecmult(X_ij) + b_2  # (N, N, Hd)
-                X_ij = X_ij.relu()
+            if point_batch is not None:
+                mask_c = (point_batch[:, None] == point_batch[None, j0:j1])  # (N, chunk)
+                F_ij = F_ij * mask_c[:, :, None].float()
 
-            # 2.e Actual computation:
-            F_ij = window_ij * X_ij * f_j  # (N, N, Hd)
-            F_ij.ranges = ranges  # Support for batches and/or block-sparsity
+            result = result + F_ij.sum(dim=1)
 
-            head_out_features.append(ContiguousBackward().apply(F_ij.sum(dim=1)))  # (N, Hd)
-
-        # Concatenate the result of our n_heads "attention heads":
-        features = torch.cat(head_out_features, dim=1)  # n_heads * (N, Hd) -> (N, H)
+        features = result  # (N, H)
 
         # 3. Transform the output features: ------------------------------------
         features = self.net_out(features)  # (N, H) -> (N, O)

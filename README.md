@@ -6,6 +6,59 @@ This work proposes a protein-fragment encoder that is trained contrastively betw
 
 ## Installation
 
+### Option A: Modern environment (recommended)
+
+Tested with Python 3.10, 3.11, and 3.12 using PyTorch 2.1+ and CUDA 12.1+.
+
+```bash
+cd LatentFrag
+bash install.sh              # creates 'latentfrag' env with Python 3.11
+# or: bash install.sh myenv 3.12   # custom env name / Python version
+
+conda activate latentfrag
+python test_setup.py         # verify
+```
+
+<details>
+<summary>Manual installation steps</summary>
+
+```bash
+conda create --name latentfrag python=3.11 -y
+conda activate latentfrag
+
+# PyTorch + geometric
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121
+pip install torch-geometric==2.3.1
+pip install torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+
+# Core scientific deps
+pip install "numpy<2" "setuptools<81"
+pip install pytorch-lightning==2.1.0 wandb biopython pdb-tools ProDy plyfile pyvtk
+pip install rdkit-pypi pandas matplotlib jupyter   # use 'rdkit' instead of 'rdkit-pypi' for Python 3.12
+pip install posebusters fcd useful-rdkit-utils
+
+# C++ standard library fix (needed on most systems)
+conda install -c conda-forge libstdcxx-ng -y
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d" "$CONDA_PREFIX/etc/conda/deactivate.d"
+echo 'export _OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"' > "$CONDA_PREFIX/etc/conda/activate.d/libstdcxx.sh"
+echo 'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' >> "$CONDA_PREFIX/etc/conda/activate.d/libstdcxx.sh"
+echo 'export LD_LIBRARY_PATH="$_OLD_LD_LIBRARY_PATH"; unset _OLD_LD_LIBRARY_PATH' > "$CONDA_PREFIX/etc/conda/deactivate.d/libstdcxx.sh"
+conda deactivate && conda activate latentfrag
+
+# Install LatentFrag
+cd LatentFrag
+pip install -e .
+```
+
+</details>
+
+### Option B: Legacy environment (Python 3.7)
+
+The models were trained with this setup, but it might not be compatible with modern CUDA/PyTorch versions. Use this if you have specific dependency constraints or want to exactly replicate the original training environment.
+
+<details>
+<summary>Click to expand legacy install instructions</summary>
+
 ```bash
 conda create --name latentfrag python=3.7 -y
 conda activate latentfrag
@@ -15,29 +68,26 @@ conda install cudatoolkit=11.3 -y
 conda install cudatoolkit-dev=11.7 -c conda-forge -y
 conda install cudnn=8.2.1 -y
 
-conda install -c conda-forge openbabel=3.0.0
-
 pip install --upgrade pip
 pip cache purge
 
 pip install open3d==0.9.0
 pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
 pip install torch-geometric==2.3.1 -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
-pip install pykeops==1.5
 
 pip install pandas matplotlib jupyter pytorch-lightning==1.8.0 wandb==0.13.4 rdkit-pypi==2022.9.5 biopython==1.78 pdb-tools==2.5.0 ProDy==2.4.0
 pip install plyfile==0.7.2 pyvtk==0.5.18
 pip install --no-index torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
 conda install -c conda-forge imageio
-pip install posebusters==0.2.12
-pip install fcd==1.2
-pip install useful-rdkit-utils
+pip install posebusters fcd useful-rdkit-utils
 
 cd LatentFrag
 pip install -e .
 ```
 
-Test the installation (mainly for pykeops):
+</details>
+
+Test the installation:
 
 ```bash
 python test_setup.py
@@ -45,11 +95,11 @@ python test_setup.py
 
 ### Install reduce
 
-Reduce is needed to protonate the protein structures. Follow instructions from [here](https://github.com/rlabduke/reduce) to install reduce.
+Reduce is needed to protonate the protein structures. Follow instructions from the [reduced repo](https://github.com/rlabduke/reduce) to install reduce.
 
 ### Install MSMS
 
-MSMS is needed to compute protein surfaces. Follow instructions from [here](https://ccsb.scripps.edu/msms/downloads/) to install MSMS.
+MSMS is needed to compute protein surfaces. Follow instructions from the [provider website](https://ccsb.scripps.edu/msms/downloads/) to install MSMS.
 
 For example for linux unpack the downloaded binary like this:
 
@@ -59,7 +109,7 @@ tar zxvf msms_i86_64Linux2_2.6.1.tar.gz
 
 ### Install PLIP
 
-PLIP is needed to compute protein-ligand interactions. Find more information [here](https://plip-tool.biotec.tu-dresden.de/plip-web/plip/index).
+PLIP is needed to compute protein-ligand interactions. Find more information on the [PLIP documentation](https://plip-tool.biotec.tu-dresden.de/plip-web/plip/index).
 
 ```bash
 git clone https://github.com/pharmai/plip.git
@@ -72,7 +122,7 @@ plipcmd -h
 
 ## Data
 
-Download the data from [here](https://figshare.com/s/c28e5d7f9d318305614e). We provide files necessary for inference and model checkpoints for both the encoder and the flow matching model. In order to generate the data for training, please follow the instructions in the `README_DATA.md`.
+Download the data from [the figshare](https://figshare.com/s/c28e5d7f9d318305614e). We provide files necessary for inference and model checkpoints for both the encoder and the flow matching model. In order to generate the data for training, please follow the instructions in the `README_DATA.md`.
 
 ## Usage
 
@@ -103,6 +153,7 @@ python src/latentfrag/encoder/train.py --config configs/train_encoder_example.ym
 ```
 
 #### Make own fragment library
+
 To create your own fragment library based on our encoder to be used with LatentFrag, you can use the following script. It will compute the latent encodings of all fragments in a single `.sdf` file. If there are multiple conformers for the same fragment, the lowest energy conformer will be used.
 
 ```bash
